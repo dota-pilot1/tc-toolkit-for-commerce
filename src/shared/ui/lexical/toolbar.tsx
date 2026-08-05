@@ -4,9 +4,12 @@ import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext
 import {
   $createParagraphNode,
   $createTextNode,
+  $findMatchingParent,
   $getRoot,
   $getSelection,
+  $isElementNode,
   $isRangeSelection,
+  INTERNAL_$isBlock,
   CAN_REDO_COMMAND,
   CAN_UNDO_COMMAND,
   FORMAT_ELEMENT_COMMAND,
@@ -53,6 +56,7 @@ import {
   List,
   ListChecks,
   ListOrdered,
+  GitBranch,
   Minus,
   Quote,
   Redo,
@@ -68,6 +72,8 @@ import { CompactSelect } from '../compact-select'
 import { INSERT_IMAGE_COMMAND } from './plugins/image-plugin'
 import { INSERT_YOUTUBE_COMMAND } from './plugins/youtube-plugin'
 import { extractYouTubeId } from './nodes/youtube-node'
+import { MermaidPreview } from './mermaid-preview'
+import { $createMermaidNode } from './nodes/mermaid-node'
 
 type Props = {
   className?: string
@@ -103,6 +109,17 @@ const HIGHLIGHT_COLORS: { label: string; value: string }[] = [
   { label: '파랑', value: '#bfdbfe' },
   { label: '주황', value: '#fed7aa' },
 ]
+
+const DEFAULT_MERMAID_SOURCE = `erDiagram
+    POST {
+        BIGINT id PK
+        VARCHAR_200 title
+        TEXT content
+        VARCHAR_50 writer
+        INTEGER view_count
+        TIMESTAMP created_at
+        TIMESTAMP updated_at
+    }`
 
 export function LexicalToolbar({ className, onImageUpload, variant = 'full' }: Props) {
   const [editor] = useLexicalComposerContext()
@@ -206,9 +223,24 @@ export function LexicalToolbar({ className, onImageUpload, variant = 'full' }: P
   const formatCodeBlock = () => {
     editor.update(() => {
       const selection = $getSelection()
-      if ($isRangeSelection(selection)) {
-        $setBlocksType(selection, () => $createCodeNode())
+      if (!$isRangeSelection(selection)) return
+
+      const blocks = new Map<string, LexicalNode>()
+      for (const node of selection.getNodes()) {
+        const block = $findMatchingParent(node, INTERNAL_$isBlock)
+        if (block && $isElementNode(block)) blocks.set(block.getKey(), block)
       }
+
+      const blockNodes = [...blocks.values()]
+      if (blockNodes.length === 0) return
+
+      const codeNode = $createCodeNode()
+      codeNode.append($createTextNode(blockNodes.map((block) => block.getTextContent()).join('\n')))
+
+      const [firstBlock, ...remainingBlocks] = blockNodes
+      firstBlock.replace(codeNode)
+      remainingBlocks.forEach((block) => block.remove())
+      codeNode.selectEnd()
     })
   }
 
@@ -264,6 +296,7 @@ export function LexicalToolbar({ className, onImageUpload, variant = 'full' }: P
           <Quote className="size-3.5" />
         </ToolbarButton>
         <MarkdownInsertButton />
+        <MermaidInsertButton />
         <LinkInsertButton />
       </div>
     )
@@ -348,6 +381,7 @@ export function LexicalToolbar({ className, onImageUpload, variant = 'full' }: P
         <span className="px-1 font-mono text-[10px] font-semibold">{'{ }'}</span>
       </ToolbarButton>
       <MarkdownInsertButton />
+      <MermaidInsertButton />
 
       <Divider />
 
@@ -381,6 +415,126 @@ export function LexicalToolbar({ className, onImageUpload, variant = 'full' }: P
 
       <YoutubeInsertButton />
     </div>
+  )
+}
+
+function MermaidInsertButton() {
+  const [editor] = useLexicalComposerContext()
+  const [open, setOpen] = useState(false)
+  const [source, setSource] = useState(DEFAULT_MERMAID_SOURCE)
+
+  const handleInsert = () => {
+    const content = source.trim()
+    if (!content) return
+
+    editor.focus()
+    editor.update(() => {
+      const mermaidNode = $createMermaidNode({ source: content })
+      const selection = $getSelection()
+      if ($isRangeSelection(selection)) {
+        selection.insertNodes([mermaidNode])
+      } else {
+        $getRoot().append(mermaidNode)
+      }
+    })
+    setOpen(false)
+  }
+
+  return (
+    <>
+      <ToolbarButton onClick={() => setOpen(true)} title="Mermaid 다이어그램 삽입">
+        <GitBranch className="size-3.5" />
+      </ToolbarButton>
+
+      <Dialog.Root open={open} onOpenChange={setOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-[240] ui-overlay" />
+          <Dialog.Content className="glass-panel fixed left-1/2 top-1/2 z-[241] flex max-h-[calc(100vh-2rem)] w-[min(1180px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-surface-border-soft shadow-2xl">
+            <div className="flex items-center justify-between gap-3 border-b border-surface-border-soft px-5 py-4">
+              <div className="min-w-0">
+                <Dialog.Title className="text-base font-semibold text-text-primary">
+                  Mermaid 다이어그램 삽입
+                </Dialog.Title>
+                <Dialog.Description className="mt-1 text-xs text-text-muted">
+                  왼쪽에 Mermaid 문법을 입력하면 오른쪽에서 미리 볼 수 있습니다.
+                </Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  className="flex size-8 shrink-0 items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-surface-muted hover:text-text-primary"
+                  aria-label="닫기"
+                >
+                  <X className="size-4" />
+                </button>
+              </Dialog.Close>
+            </div>
+
+            <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto p-5 lg:grid-cols-2">
+              <section className="flex min-h-[360px] min-w-0 flex-col overflow-hidden rounded-md border border-surface-border-soft">
+                <div className="border-b border-surface-border-soft bg-surface-muted px-4 py-3">
+                  <h3 className="text-xs font-black uppercase tracking-[0.12em] text-text-secondary">
+                    편집
+                  </h3>
+                </div>
+                <textarea
+                  value={source}
+                  onChange={(event) => setSource(event.target.value)}
+                  onKeyDown={(event) => {
+                    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                      event.preventDefault()
+                      handleInsert()
+                    }
+                  }}
+                  autoFocus
+                  spellCheck={false}
+                  className="min-h-[320px] flex-1 resize-none bg-surface-raised px-4 py-4 font-mono text-xs leading-6 text-text-primary outline-none"
+                  placeholder={'erDiagram\n    POST {\n        BIGINT id PK\n    }'}
+                />
+              </section>
+
+              <section className="flex min-h-[360px] min-w-0 flex-col overflow-hidden rounded-md border border-surface-border-soft">
+                <div className="border-b border-surface-border-soft bg-surface-muted px-4 py-3">
+                  <h3 className="text-xs font-black uppercase tracking-[0.12em] text-text-secondary">
+                    미리보기
+                  </h3>
+                </div>
+                <div className="min-h-[320px] flex-1 overflow-auto bg-surface-raised p-4">
+                  {source.trim() ? (
+                    <MermaidPreview block={{ id: 'dialog-preview', source: source.trim() }} index={0} />
+                  ) : (
+                    <div className="grid min-h-[280px] place-items-center text-sm text-text-muted">
+                      Mermaid 코드를 입력하세요.
+                    </div>
+                  )}
+                </div>
+              </section>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-surface-border-soft bg-surface-muted/60 px-5 py-4">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                className="h-9 min-w-16 px-4"
+                onClick={() => setOpen(false)}
+              >
+                취소
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                className="h-9 min-w-20 px-4"
+                disabled={!source.trim()}
+                onClick={handleInsert}
+              >
+                삽입
+              </Button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+    </>
   )
 }
 

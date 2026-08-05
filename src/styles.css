@@ -146,6 +146,10 @@
     padding: 0;
   }
 
+  .lexical-mermaid-node {
+    @apply my-3 w-full;
+  }
+
   .lexical-mermaid-preview svg {
     max-width: 100%;
     height: auto;
@@ -435,4 +439,3 @@ body {
     display: none;
   }
 }
-

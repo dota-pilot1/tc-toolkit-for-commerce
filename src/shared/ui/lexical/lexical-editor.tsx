@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { LexicalComposer } from '@lexical/react/LexicalComposer'
 import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin'
 import { ContentEditable } from '@lexical/react/LexicalContentEditable'
@@ -13,17 +13,28 @@ import { HorizontalRuleNode } from '@lexical/react/LexicalHorizontalRuleNode'
 import { TablePlugin } from '@lexical/react/LexicalTablePlugin'
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext'
 import { MarkdownShortcutPlugin } from '@lexical/react/LexicalMarkdownShortcutPlugin'
-import { TRANSFORMERS } from '@lexical/markdown'
+import { ORDERED_LIST, TRANSFORMERS } from '@lexical/markdown'
 import { CodeNode, CodeHighlightNode, registerCodeHighlighting } from '@lexical/code'
 import { HeadingNode, QuoteNode } from '@lexical/rich-text'
-import { ListNode, ListItemNode } from '@lexical/list'
+import { $isListItemNode, $isListNode, ListNode, ListItemNode } from '@lexical/list'
 import { LinkNode } from '@lexical/link'
 import { TableNode, TableCellNode, TableRowNode } from '@lexical/table'
-import { type EditorState } from 'lexical'
+import {
+  $createParagraphNode,
+  $createTextNode,
+  $getSelection,
+  $isRangeSelection,
+  COMMAND_PRIORITY_HIGH,
+  KEY_BACKSPACE_COMMAND,
+  type EditorState,
+} from 'lexical'
+import { $findMatchingParent } from '@lexical/utils'
+import { $isCodeNode } from '@lexical/code'
 import { editorTheme } from './theme'
 import { LexicalToolbar } from './toolbar'
 import { ImageNode } from './nodes/image-node'
 import { YoutubeNode } from './nodes/youtube-node'
+import { MermaidNode, $createMermaidNode } from './nodes/mermaid-node'
 import { DragDropImagePlugin, ImagePlugin } from './plugins/image-plugin'
 import { YoutubePlugin } from './plugins/youtube-plugin'
 import { TableActionMenuPlugin } from './plugins/table-action-plugin'
@@ -40,21 +51,139 @@ type LexicalEditorProps = {
   toolbarVariant?: 'full' | 'simple'
 }
 
-type SerializedLexicalNode = {
-  type?: string
-  language?: string | null
-  text?: string
-  children?: SerializedLexicalNode[]
-}
-
-export type MermaidBlock = {
-  id: string
-  source: string
-}
+// Number prefixes such as `1. ` remain plain text while typing.
+// Numbered lists are still available through the toolbar button.
+const MARKDOWN_TRANSFORMERS = TRANSFORMERS.filter(
+  (transformer) => transformer !== ORDERED_LIST,
+)
 
 function CodeHighlightPlugin() {
   const [editor] = useLexicalComposerContext()
   useEffect(() => registerCodeHighlighting(editor), [editor])
+  return null
+}
+
+function CodeBlockBackspacePlugin() {
+  const [editor] = useLexicalComposerContext()
+
+  useEffect(
+    () =>
+      editor.registerCommand(
+        KEY_BACKSPACE_COMMAND,
+        (event) => {
+          const selection = $getSelection()
+          if (!$isRangeSelection(selection) || !selection.isCollapsed()) return false
+
+          const anchorNode = selection.anchor.getNode()
+          const codeNode = $isCodeNode(anchorNode)
+            ? anchorNode
+            : $findMatchingParent(anchorNode, $isCodeNode)
+
+          if (!codeNode || !codeNode.isEmpty()) return false
+
+          event.preventDefault()
+          editor.update(() => {
+            const paragraph = $createParagraphNode()
+            codeNode.replace(paragraph)
+            paragraph.select()
+          })
+          return true
+        },
+        COMMAND_PRIORITY_HIGH,
+      ),
+    [editor],
+  )
+
+  return null
+}
+
+function CodeBlockMergePlugin() {
+  const [editor] = useLexicalComposerContext()
+
+  useEffect(
+    () =>
+      editor.registerNodeTransform(CodeNode, (codeNode) => {
+        const nextNode = codeNode.getNextSibling()
+        if (!$isCodeNode(nextNode) || codeNode.getLanguage() !== nextNode.getLanguage()) {
+          return
+        }
+
+        const nextChildren = nextNode.getChildren()
+        codeNode.append($createTextNode('\n'), ...nextChildren)
+        nextNode.remove()
+      }),
+    [editor],
+  )
+
+  return null
+}
+
+function MermaidCodeNodeTransformPlugin() {
+  const [editor] = useLexicalComposerContext()
+
+  useEffect(
+    () =>
+      editor.registerNodeTransform(CodeNode, (codeNode) => {
+        const source = codeNode.getTextContent().trim()
+        const language = codeNode.getLanguage()?.toLowerCase()
+        if (
+          !source ||
+          (language !== 'mermaid' && language !== 'mmd' && !isMermaidSource(source))
+        ) {
+          return
+        }
+
+        codeNode.replace($createMermaidNode({ source }))
+      }),
+    [editor],
+  )
+
+  return null
+}
+
+function OrderedListBackspacePlugin() {
+  const [editor] = useLexicalComposerContext()
+
+  useEffect(
+    () =>
+      editor.registerCommand(
+        KEY_BACKSPACE_COMMAND,
+        (event) => {
+          const selection = $getSelection()
+          if (!$isRangeSelection(selection) || !selection.isCollapsed()) return false
+
+          const anchorNode = selection.anchor.getNode()
+          const listItem = $findMatchingParent(anchorNode, $isListItemNode)
+          const listNode = listItem?.getParent()
+          if (!listItem || !$isListNode(listNode) || listNode.getListType() !== 'number') {
+            return false
+          }
+
+          const firstChild = listItem.getFirstChild()
+          const firstDescendant = listItem.getFirstDescendant()
+          const atStart =
+            (firstDescendant?.is(anchorNode) && selection.anchor.offset === 0) ||
+            (firstChild?.is(anchorNode) && selection.anchor.offset === 0) ||
+            (listItem.is(anchorNode) && selection.anchor.offset === 0)
+          if (!atStart || !firstChild) return false
+
+          event.preventDefault()
+          const paragraph = $createParagraphNode()
+          listItem.getChildren().forEach((child) => paragraph.append(child))
+          if (listNode.getChildrenSize() === 1) {
+            listNode.replace(paragraph)
+          } else {
+            listNode.insertBefore(paragraph, listItem)
+            listItem.remove()
+          }
+          paragraph.selectStart()
+          return true
+        },
+        COMMAND_PRIORITY_HIGH,
+      ),
+    [editor],
+  )
+
   return null
 }
 
@@ -75,146 +204,9 @@ function isValidLexicalJson(value: string): boolean {
   }
 }
 
-function getSerializedNodeText(node: SerializedLexicalNode): string {
-  if (typeof node.text === 'string') return node.text
-  return node.children?.map(getSerializedNodeText).join('') ?? ''
-}
-
 function isMermaidSource(source: string): boolean {
   return /^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|journey|gitGraph|mindmap|timeline|quadrantChart|requirementDiagram|C4Context|architecture-beta|block-beta)\b/.test(
     source.trim(),
-  )
-}
-
-function collectMermaidBlocks(node: SerializedLexicalNode, blocks: MermaidBlock[]) {
-  const language = node.language?.toLowerCase()
-  if (node.type === 'code') {
-    const source = getSerializedNodeText(node).trim()
-    if (source && (language === 'mermaid' || language === 'mmd' || isMermaidSource(source))) {
-      blocks.push({
-        id: `${blocks.length}-${source.length}`,
-        source,
-      })
-    }
-    return
-  }
-
-  node.children?.forEach((child) => collectMermaidBlocks(child, blocks))
-}
-
-function extractMermaidBlocks(value?: string): MermaidBlock[] {
-  if (!value) return []
-  try {
-    const parsed = JSON.parse(value) as { root?: SerializedLexicalNode }
-    const blocks: MermaidBlock[] = []
-    if (parsed.root) collectMermaidBlocks(parsed.root, blocks)
-    return blocks
-  } catch {
-    return []
-  }
-}
-
-export function MermaidPreview({
-  block,
-  frame = true,
-  index,
-}: {
-  block: MermaidBlock
-  frame?: boolean
-  index: number
-}) {
-  const [svg, setSvg] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let disposed = false
-
-    async function render() {
-      try {
-        setError(null)
-        setSvg(null)
-        const mermaid = (await import('mermaid')).default
-        mermaid.initialize({
-          startOnLoad: false,
-          securityLevel: 'strict',
-          theme: 'base',
-          themeVariables: {
-            primaryColor: '#ffffff',
-            primaryBorderColor: '#059669',
-            primaryTextColor: '#111827',
-            lineColor: '#374151',
-            secondaryColor: '#f8fafc',
-            secondaryBorderColor: '#94a3b8',
-            secondaryTextColor: '#111827',
-            tertiaryColor: '#ecfdf5',
-            tertiaryBorderColor: '#059669',
-            tertiaryTextColor: '#111827',
-            fontFamily: 'Pretendard Variable, Pretendard, sans-serif',
-          },
-        })
-        const id = `lexical-mermaid-${Date.now()}-${index}`
-        const result = await mermaid.render(id, block.source)
-        if (!disposed) setSvg(result.svg)
-      } catch (renderError) {
-        if (!disposed) {
-          setError(
-            renderError instanceof Error
-              ? renderError.message
-              : 'Mermaid 다이어그램을 렌더링하지 못했습니다.',
-          )
-        }
-      }
-    }
-
-    void render()
-
-    return () => {
-      disposed = true
-    }
-  }, [block.source, index])
-
-  if (error) {
-    return (
-      <div
-        className={`lexical-mermaid-preview lexical-mermaid-preview-error${frame ? '' : ' lexical-mermaid-preview-flat'}`}
-      >
-        {error}
-      </div>
-    )
-  }
-
-  if (!svg) {
-    return (
-      <div
-        className={`lexical-mermaid-preview${frame ? '' : ' lexical-mermaid-preview-flat'}`}
-      >
-        다이어그램 렌더링 중...
-      </div>
-    )
-  }
-
-  return (
-    <div
-      className={`lexical-mermaid-preview${frame ? '' : ' lexical-mermaid-preview-flat'}`}
-      dangerouslySetInnerHTML={{ __html: svg }}
-    />
-  )
-}
-
-export function MermaidPreviewList({ blocks }: { blocks: MermaidBlock[] }) {
-  if (blocks.length === 0) return null
-
-  return (
-    <div className="border-t border-surface-border-soft px-5 py-4">
-      <div className="mb-2 text-xs font-black uppercase tracking-[0.12em] text-brand-primary">
-        Mermaid Preview
-      </div>
-      <div className="space-y-3">
-        {blocks.map((block, index) => (
-          <MermaidPreview key={`${block.id}-${index}`} block={block} index={index} />
-        ))}
-      </div>
-    </div>
   )
 }
 
@@ -228,22 +220,13 @@ export function LexicalEditor({
   readOnly = false,
   toolbarVariant = 'full',
 }: LexicalEditorProps) {
-  const [mermaidBlocks, setMermaidBlocks] = useState(() =>
-    extractMermaidBlocks(initialState),
-  )
-
   const handleChange = useCallback(
     (editorState: EditorState) => {
       const serialized = JSON.stringify(editorState.toJSON())
-      setMermaidBlocks(extractMermaidBlocks(serialized))
       onChange(serialized)
     },
     [onChange],
   )
-
-  useEffect(() => {
-    setMermaidBlocks(extractMermaidBlocks(initialState))
-  }, [initialState])
 
   const initialConfig = useMemo(
     () => ({
@@ -266,6 +249,7 @@ export function LexicalEditor({
         TableRowNode,
         ImageNode,
         YoutubeNode,
+        MermaidNode,
       ],
       onError: (error: Error) => {
         console.error('Lexical error:', error)
@@ -315,14 +299,17 @@ export function LexicalEditor({
         <HorizontalRulePlugin />
         <TablePlugin hasHorizontalScroll />
         <CodeHighlightPlugin />
-        {readOnly ? null : <MarkdownShortcutPlugin transformers={TRANSFORMERS} />}
+        {!readOnly ? <CodeBlockBackspacePlugin /> : null}
+        {!readOnly ? <CodeBlockMergePlugin /> : null}
+        <MermaidCodeNodeTransformPlugin />
+        {!readOnly ? <OrderedListBackspacePlugin /> : null}
+        {readOnly ? null : <MarkdownShortcutPlugin transformers={MARKDOWN_TRANSFORMERS} />}
         {readOnly ? null : <ImagePlugin />}
         {readOnly ? null : <DragDropImagePlugin onUpload={uploadImageToS3} />}
         {readOnly ? null : <YoutubePlugin />}
         {readOnly ? null : <TableActionMenuPlugin />}
         <OnChangePlugin onChange={handleChange} />
         <EditablePlugin readOnly={readOnly} />
-        <MermaidPreviewList blocks={mermaidBlocks} />
       </div>
     </LexicalComposer>
   )

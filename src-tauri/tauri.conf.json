@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicgirault/tauri-v2-schema/main/schema.json",
   "productName": "TC DX MyBatis",
-  "version": "0.1.11",
+  "version": "0.1.13",
   "identifier": "com.towercrane.tcdx.mybatis",
   "build": {
     "beforeDevCommand": "npm run dev",

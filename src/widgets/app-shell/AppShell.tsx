@@ -13,7 +13,7 @@ import TestingModule from "../testing/TestPlaybookModule";
 import AxPlaybookModule from "../ax/AxPlaybookModule";
 import DevopsPlaybookModule from "../devops/DevopsPlaybookModule";
 import CicdPlaybookModule from "../cicd/CicdPlaybookModule";
-import ArchitecturePlaybookModule from "../architecture/ArchitecturePlaybookModule";
+import MybatisPlaybookModule from "../architecture/MybatisPlaybookModule";
 import ApiDocModule from "../apidoc/ApiDocModule";
 import ApiExcelModule from "../api-excel/ApiExcelModule";
 import CommercePlaybookModule from "../commerce/CommercePlaybookModule";
@@ -345,7 +345,7 @@ function AppShell({ user, onUserUpdate, onLogout }: Props) {
         ) : active === "cicd" ? (
           <CicdPlaybookModule />
         ) : active === "architecture" ? (
-          <ArchitecturePlaybookModule />
+          <MybatisPlaybookModule />
         ) : active === "apidoc" ? (
           <ApiDocModule isAdmin={user.role === "admin"} />
         ) : active === "apiexcel" ? (

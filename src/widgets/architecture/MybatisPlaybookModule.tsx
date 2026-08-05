@@ -4,6 +4,7 @@ import {
   CircleHelp,
   CloudCog,
   FileText,
+  GitBranch,
   Pencil,
   Plus,
   RefreshCw,
@@ -27,12 +28,16 @@ import OrderControls from "../../shared/ui/OrderControls";
 import {
   createArchitectureCategory,
   createArchitectureDocument,
+  createArchitectureDocumentComment,
   createArchitectureTopic,
   deleteArchitectureCategory,
   deleteArchitectureDocument,
+  deleteArchitectureDocumentComment,
   deleteArchitectureTopic,
+  listArchitectureDocumentComments,
   listArchitecturePlaybook,
   moveArchitectureDocument,
+  updateArchitectureDocumentComment,
   updateArchitectureCategory,
   updateArchitectureDocument,
   updateArchitectureTopic,
@@ -49,6 +54,8 @@ type TitleDialog = {
 type DocumentDialog = {
   mode: "create" | "edit" | "delete";
   target?: ArchitecturePlaybookDocument;
+  parentId?: string | null;
+  parentTitle?: string;
 };
 
 const CATEGORY_WIDTH_KEY = "architecture-playbook-category-width-v2";
@@ -67,7 +74,30 @@ function readStoredWidth(
     : fallback;
 }
 
-function ArchitecturePlaybookModule() {
+function flattenDocuments(documents: ArchitecturePlaybookDocument[]) {
+  const children = new Map<string, ArchitecturePlaybookDocument[]>();
+  const roots: ArchitecturePlaybookDocument[] = [];
+  for (const document of documents) {
+    if (document.parentId) {
+      const siblings = children.get(document.parentId) ?? [];
+      siblings.push(document);
+      children.set(document.parentId, siblings);
+    } else {
+      roots.push(document);
+    }
+  }
+  const rows: { document: ArchitecturePlaybookDocument; depth: number }[] = [];
+  function visit(items: ArchitecturePlaybookDocument[], depth: number) {
+    for (const document of items) {
+      rows.push({ document, depth });
+      visit(children.get(document.id) ?? [], depth + 1);
+    }
+  }
+  visit(roots, 0);
+  return rows;
+}
+
+function MybatisPlaybookModule() {
   const [categories, setCategories] = useState<ArchitecturePlaybookCategory[]>(
     [],
   );
@@ -84,6 +114,9 @@ function ArchitecturePlaybookModule() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
+  const [expandedDocumentIds, setExpandedDocumentIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [inlineTitle, setInlineTitle] = useState({ category: "", topic: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -99,6 +132,15 @@ function ArchitecturePlaybookModule() {
   const topics = category?.topics ?? [];
   const topic = topics.find((item) => item.id === topicId) ?? topics[0];
   const documents = topic?.documents ?? [];
+  const documentRows = flattenDocuments(documents).filter(({ document }) => {
+    let parentId = document.parentId ?? null;
+    while (parentId) {
+      if (!expandedDocumentIds.has(parentId)) return false;
+      const parent = documents.find((item) => item.id === parentId);
+      parentId = parent?.parentId ?? null;
+    }
+    return true;
+  });
   const document =
     documents.find((item) => item.id === documentId) ?? documents[0];
   const resizeCategory = useColumnResize(categoryWidth, setCategoryWidth, {
@@ -116,6 +158,16 @@ function ArchitecturePlaybookModule() {
   useEffect(() => {
     window.localStorage.setItem(TOPIC_WIDTH_KEY, String(topicWidth));
   }, [topicWidth]);
+
+  useEffect(() => {
+    const documentIds = new Set(documents.map((item) => item.id));
+    setExpandedDocumentIds((current) => {
+      const next = new Set(
+        [...current].filter((id) => documentIds.has(id)),
+      );
+      return next.size === current.size ? current : next;
+    });
+  }, [topicId, documents]);
 
   async function load(
     nextCategoryId?: string,
@@ -156,7 +208,10 @@ function ArchitecturePlaybookModule() {
     setTitleDialog({ kind, mode: "delete", target });
   }
   function openDocumentDialog(state: DocumentDialog) {
-    setDocumentDialog(state);
+    setDocumentDialog({
+      ...state,
+      parentId: state.parentId ?? state.target?.parentId ?? null,
+    });
     setTitle(state.target?.title ?? "");
     setBody(state.target?.content ?? "");
   }
@@ -254,11 +309,13 @@ function ArchitecturePlaybookModule() {
         await updateArchitectureDocument(documentDialog.target.id, {
           title: title.trim(),
           content: body,
+          parentId: documentDialog.parentId ?? null,
         });
       else
         await createArchitectureDocument(topic.id, {
           title: title.trim(),
           content: body,
+          parentId: documentDialog.parentId ?? null,
         });
       await load(category?.id, topic.id, documentDialog.target?.id);
       setDocumentDialog(null);
@@ -427,35 +484,74 @@ function ArchitecturePlaybookModule() {
               </div>
             </header>
             <div className="min-h-0 flex-1 overflow-y-auto p-5">
-              {documents.length ? (
+              {documentRows.length ? (
                 <div className="space-y-2">
-                  {documents.map((item, index) => (
-                    <InlineTitleRow
-                      key={item.id}
-                      title={item.title}
-                      number={index + 1}
-                      active={item.id === document?.id}
-                      busy={busy}
-                      onOpen={() => {
-                        setDocumentId(item.id);
-                        setDetail(item);
-                      }}
-                      onSave={(nextTitle) => saveDocumentTitle(item, nextTitle)}
-                      onDelete={() =>
-                        openDocumentDialog({ mode: "delete", target: item })
-                      }
-                      extraActions={
-                        <OrderControls
-                          itemLabel={item.title}
-                          busy={busy}
-                          upDisabled={index === 0}
-                          downDisabled={index === documents.length - 1}
-                          onMoveUp={() => void moveDocument(item, "up")}
-                          onMoveDown={() => void moveDocument(item, "down")}
-                        />
-                      }
-                    />
-                  ))}
+                  {documentRows.map(({ document: item, depth }, index) => {
+                    const hasChildren = documents.some(
+                      (document) => document.parentId === item.id,
+                    );
+                    const expanded = expandedDocumentIds.has(item.id);
+                    const siblings = documentRows.filter(
+                      (row) =>
+                        (row.document.parentId ?? null) ===
+                        (item.parentId ?? null),
+                    );
+                    const siblingIndex = siblings.findIndex(
+                      (row) => row.document.id === item.id,
+                    );
+                    return (
+                      <InlineTitleRow
+                        key={item.id}
+                        title={item.title}
+                        number={index + 1}
+                        depth={depth}
+                        active={item.id === document?.id}
+                        busy={busy}
+                        onRowClick={() => {
+                          setDocumentId(item.id);
+                          setDetail(null);
+                        }}
+                        onOpen={() => {
+                          setDocumentId(item.id);
+                          setDetail(item);
+                        }}
+                        onAddChild={
+                          depth === 0
+                            ? () =>
+                                openDocumentDialog({
+                                  mode: "create",
+                                  parentId: item.id,
+                                  parentTitle: item.title,
+                                })
+                            : undefined
+                        }
+                        hasChildren={hasChildren}
+                        expanded={expanded}
+                        onToggle={() =>
+                          setExpandedDocumentIds((current) => {
+                            const next = new Set(current);
+                            if (next.has(item.id)) next.delete(item.id);
+                            else next.add(item.id);
+                            return next;
+                          })
+                        }
+                        onSave={(nextTitle) => saveDocumentTitle(item, nextTitle)}
+                        onDelete={() =>
+                          openDocumentDialog({ mode: "delete", target: item })
+                        }
+                        extraActions={
+                          <OrderControls
+                            itemLabel={item.title}
+                            busy={busy}
+                            upDisabled={siblingIndex === 0}
+                            downDisabled={siblingIndex === siblings.length - 1}
+                            onMoveUp={() => void moveDocument(item, "up")}
+                            onMoveDown={() => void moveDocument(item, "down")}
+                          />
+                        }
+                      />
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="grid min-h-48 place-items-center text-sm font-semibold text-text-muted">
@@ -512,6 +608,12 @@ function ArchitecturePlaybookModule() {
             const target = detail;
             setDetail(null);
             openDocumentDialog({ mode: "delete", target });
+          }}
+          commentApi={{
+            list: listArchitectureDocumentComments,
+            create: createArchitectureDocumentComment,
+            update: updateArchitectureDocumentComment,
+            delete: deleteArchitectureDocumentComment,
           }}
           onClose={() => setDetail(null)}
         />
@@ -623,22 +725,34 @@ function Panel({
 function InlineTitleRow({
   title,
   number,
+  depth = 0,
   active,
   icon,
   busy,
   onClick,
+  onRowClick,
   onOpen,
+  onAddChild,
+  hasChildren,
+  expanded,
+  onToggle,
   onSave,
   onDelete,
   extraActions,
 }: {
   title: string;
   number?: number;
+  depth?: number;
   active?: boolean;
   icon?: boolean;
   busy: boolean;
   onClick?: () => void;
+  onRowClick?: () => void;
   onOpen?: () => void;
+  onAddChild?: () => void;
+  hasChildren?: boolean;
+  expanded?: boolean;
+  onToggle?: () => void;
   onSave: (nextTitle: string) => Promise<void>;
   onDelete: () => void;
   extraActions?: ReactNode;
@@ -680,7 +794,9 @@ function InlineTitleRow({
 
   return (
     <div
-      className={`flex items-center gap-2 rounded-md p-2.5 ${active ? "bg-brand-glass" : "bg-surface-muted"}`}
+      onClick={onRowClick && !editing && !busy ? onRowClick : undefined}
+      style={{ marginLeft: `${depth * 28}px` }}
+      className={`flex items-center gap-2 rounded-md p-2.5 ${active ? "bg-brand-glass" : "bg-surface-muted"} ${onRowClick ? "cursor-pointer" : ""}`}
     >
       {editing ? (
         <div className="flex min-w-0 flex-1 items-center gap-1">
@@ -718,7 +834,11 @@ function InlineTitleRow({
       ) : (
         <>
           {onOpen ? (
-            <div className="flex min-w-0 flex-1 items-center gap-2 p-1">
+            <div
+              className="flex min-w-0 flex-1 items-center gap-2 p-1"
+              onDoubleClick={startEditing}
+              title="제목을 더블클릭하여 수정"
+            >
               {number !== undefined && (
                 <span
                   className="grid size-6 shrink-0 place-items-center rounded-md border border-surface-border-soft bg-surface-raised text-[11px] font-black text-text-muted"
@@ -727,8 +847,29 @@ function InlineTitleRow({
                   {number}
                 </span>
               )}
+              {hasChildren && onToggle && (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggle();
+                  }}
+                  className="grid size-6 shrink-0 place-items-center rounded-md border border-surface-border-soft bg-surface-raised text-text-muted transition-colors hover:text-brand-primary"
+                  title={expanded ? "하위 문서 접기" : "하위 문서 펼치기"}
+                  aria-label={expanded ? "하위 문서 접기" : "하위 문서 펼치기"}
+                >
+                  <ChevronRight
+                    className={`size-3.5 transition-transform ${expanded ? "rotate-90" : ""}`}
+                  />
+                </button>
+              )}
               {icon && (
                 <FileText className="size-3.5 shrink-0 text-brand-primary" />
+              )}
+              {depth > 0 && (
+                <span className="shrink-0 text-sm font-black text-brand-primary">
+                  ㄴ
+                </span>
               )}
               <span className="truncate text-sm font-black text-text-primary">
                 {title}
@@ -738,6 +879,8 @@ function InlineTitleRow({
             <button
               type="button"
               onClick={onClick}
+              onDoubleClick={startEditing}
+              title="제목을 더블클릭하여 수정"
               className="flex min-w-0 flex-1 items-center gap-2 p-1 text-left"
             >
               {number !== undefined && (
@@ -748,15 +891,64 @@ function InlineTitleRow({
                   {number}
                 </span>
               )}
+              {hasChildren && onToggle && (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggle();
+                  }}
+                  className="grid size-6 shrink-0 place-items-center rounded-md border border-surface-border-soft bg-surface-raised text-text-muted transition-colors hover:text-brand-primary"
+                  title={expanded ? "하위 문서 접기" : "하위 문서 펼치기"}
+                  aria-label={expanded ? "하위 문서 접기" : "하위 문서 펼치기"}
+                >
+                  <ChevronRight
+                    className={`size-3.5 transition-transform ${expanded ? "rotate-90" : ""}`}
+                  />
+                </button>
+              )}
               {icon && (
                 <FileText className="size-3.5 shrink-0 text-brand-primary" />
+              )}
+              {depth > 0 && (
+                <span className="shrink-0 text-sm font-black text-brand-primary">
+                  ㄴ
+                </span>
               )}
               <span className="truncate text-sm font-black text-text-primary">
                 {title}
               </span>
             </button>
           )}
-          {extraActions}
+          {onAddChild && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onAddChild();
+              }}
+              disabled={busy}
+              className="ui-icon-button h-8 w-8 shrink-0 text-brand-primary"
+              title="하위 문서 추가"
+            >
+              <GitBranch className="size-3.5" />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onDelete();
+            }}
+            disabled={busy}
+            className="ui-icon-button h-8 w-8 shrink-0 text-[var(--destructive)]"
+            title="삭제"
+          >
+            <Trash2 className="size-3.5" />
+          </button>
+          {extraActions && (
+            <div onClick={(event) => event.stopPropagation()}>{extraActions}</div>
+          )}
           {onOpen && (
             <button
               type="button"
@@ -772,27 +964,6 @@ function InlineTitleRow({
               <ChevronRight className="size-3.5" />
             </button>
           )}
-          <button
-            type="button"
-            onClick={startEditing}
-            disabled={busy}
-            className="ui-icon-button h-8 w-8 shrink-0"
-            title="인라인 수정"
-          >
-            <Pencil className="size-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onDelete();
-            }}
-            disabled={busy}
-            className="ui-icon-button h-8 w-8 shrink-0 text-[var(--destructive)]"
-            title="삭제"
-          >
-            <Trash2 className="size-3.5" />
-          </button>
         </>
       )}
     </div>
@@ -844,10 +1015,13 @@ function DocumentDialog({
   return (
     <DialogFrame
       contentClassName="flex min-h-0 flex-1 flex-col"
+      size={deleting ? "default" : "wide"}
       title={
         deleting
           ? "Lexical 문서 삭제"
-          : `Lexical 문서 ${state.mode === "create" ? "추가" : "수정"}`
+          : state.mode === "create" && state.parentId
+            ? "하위 문서 추가"
+            : `Lexical 문서 ${state.mode === "create" ? "추가" : "수정"}`
       }
       onClose={onClose}
     >
@@ -857,6 +1031,11 @@ function DocumentDialog({
         </p>
       ) : (
         <>
+          {state.parentId && (
+            <p className="mb-3 rounded-md border border-brand-border bg-brand-glass px-3 py-2 text-xs font-bold text-brand-primary">
+              상위 문서: {state.parentTitle ?? "선택한 문서"}
+            </p>
+          )}
           <label className="block text-xs font-black text-text-secondary">
             문서 제목
             <input
@@ -870,8 +1049,8 @@ function DocumentDialog({
             <LexicalEditor
               initialState={body}
               onChange={onBody}
-              minHeight="420px"
-              height="min(520px, calc(100vh - 18rem))"
+              minHeight="520px"
+              height="min(680px, calc(100vh - 16rem))"
               scrollable
             />
           </div>
@@ -925,17 +1104,21 @@ function Actions({
 function DialogFrame({
   title,
   onClose,
+  size = "default",
   contentClassName = "",
   children,
 }: {
   title: string;
   onClose: () => void;
+  size?: "default" | "wide";
   contentClassName?: string;
   children: ReactNode;
 }) {
   return (
     <div className="fixed inset-0 z-40 grid place-items-center bg-[color-mix(in_srgb,var(--background)_72%,transparent)] p-4">
-      <div className="flex max-h-[calc(100vh-2rem)] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-surface-border bg-surface-raised p-5 shadow-2xl">
+      <div
+        className={`flex max-h-[calc(100vh-2rem)] w-full ${size === "wide" ? "max-w-6xl" : "max-w-3xl"} flex-col overflow-hidden rounded-xl border border-surface-border bg-surface-raised p-5 shadow-2xl`}
+      >
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-black text-text-primary">{title}</h2>
           <button
@@ -1006,4 +1189,4 @@ function DetailDialog({
   );
 }
 
-export default ArchitecturePlaybookModule;
+export default MybatisPlaybookModule;
